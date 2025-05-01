@@ -1,0 +1,24 @@
+name: picasso_gan
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch=2.1
+  - torchvision
+  - cudatoolkit=11.8
+  - opencv
+  - faiss-gpu
+  - scikit-image
+  - scikit-learn
+  - pandas
+  - matplotlib
+  - mediapipe
+  - dlib
+  - pip
+  - pip:
+      - ninja  # SA‑E 編譯
+      - pyemd
+      - hyperopt
+      - torch-fidelity
