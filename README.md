@@ -12,10 +12,10 @@ Picasso_GAN_Project/
 │   ├── sae/
 │   │   ├── model.py      # SAE Encoder/Decoder 架構
 │   │   └── train.py      # 訓練 SAE
-│   ├── edge_entropy.py   # 計算 H
+│   ├── edge_entropy.py   # 計算 H 　
 │   ├── color_hist.py     # Lab 直方圖 & JS
-│   ├── palette_emd.py    # Palette‑EMD (可選)
-│   ├── expression.py     # AU + landmark 萃取
+│   ├── palette_emd.py    # Palette‑EMD 
+│   ├── expression.py     # AU + landmark 萃取　
 │   └── extract_all.py    # 產出 (S,C,E,H,JS,σ)
 ├── srm/
 │   ├── build_index.py    # 建立 Faiss 索引

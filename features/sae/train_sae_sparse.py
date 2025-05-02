@@ -31,8 +31,10 @@ class MixedFolder256(Dataset):
            ratio_style: 每張取 style 的機率 (0~1)  
            gray_mode  : all / style / none  
         """
-        self.nat  = sorted(glob.glob(os.path.join(nat_root,  '*')))
-        self.sty  = sorted(glob.glob(os.path.join(sty_root, '*'))) if sty_root else []
+        self.nat = sorted(glob.glob(os.path.join(nat_root, '*')))
+        self.sty = sorted(glob.glob(os.path.join(sty_root, '*'))) if sty_root else []
+        if len(self.nat)==0 and len(self.sty)==0:
+            raise ValueError("natural / style 資料夾皆為空，無法訓練 SAE")
         self.r    = ratio_style
         self.gray_mode = gray_mode
 
@@ -103,7 +105,6 @@ ap.add_argument('--lambda_warm',type=int,   default=2,
 ap.add_argument('--ksparse',    type=float, default=0.03,
                 help='保留活躍百分比 (0~1)，<=0 停用 k‑sparse')
 ap.add_argument('--save',       default='features/sae/sae_sparse2048.pth')
-
 args = ap.parse_args()
 
 # ───────────────────────── dataset loader ───────────────────
@@ -120,6 +121,19 @@ dloader = DataLoader(dataset, batch_size=args.batch, shuffle=True,
 
 # ───────────────────────── model / optim ───────────────────
 model = SAE(bottleneck=args.bottleneck).cuda()
+# ── monkey-patch encode / decode（若 class 裡本來就沒有） ──
+if not hasattr(model, "encode"):
+    def _encode(self, x):
+        _, z = self.forward(x)     # self.forward 回傳 recon, z
+        return z
+    model.encode = _encode.__get__(model, SAE)   # 綁定到 instance
+
+if not hasattr(model, "decode"):
+    # 大多數實作都有 self.decoder，若叫 self.dec 請改這行
+    def _decode(self, z):
+        return self.decoder(z)
+    model.decode = _decode.__get__(model, SAE)
+# ────────────────────────────────────────────────────────────
 opt   = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 # ───────────────────────── training loop ───────────────────
@@ -127,19 +141,18 @@ k_percent = args.ksparse if args.ksparse>0 else None
 warm_epochs = max(1, args.lambda_warm)
 
 for epoch in range(1, args.epochs+1):
-    pbar = tqdm(dloader, desc=f"[Epoch {epoch}/{args.epochs}]")
-    running = {'mse':0., 'l1':0., 'sparsity':0., 'sigma':0.}
+    pbar = tqdm(dloader, desc=f"[E{epoch}/{args.epochs}]")
+    agg = {'mse':0,'l1':0,'sp':0,'sigma':0}
     for imgs in pbar:
         imgs = imgs.cuda()
-        # down‑sample GT to 64×64 因為 decoder 輸出 64²
-        imgs64 = F.interpolate(imgs, size=64, mode='bilinear', align_corners=False)
+        imgs64 = F.interpolate(imgs, 64, mode='bilinear', align_corners=False)
 
-        recon, z = model(imgs)
-        loss_mse = F.mse_loss(recon, imgs64)
+        # -- Encoder 取 z ---------------------------------------------------
+        z = model.encode(imgs)                  # ← 只要一次
 
-        # k-sparse masking
+        # -- k-sparse -------------------------------------------------------
         if k_percent:
-            k = int(z.shape[1]*k_percent)
+            k = int(z.shape[1] * k_percent)
             topk = torch.topk(z.abs(), k, dim=1).indices
             mask = torch.zeros_like(z).scatter_(1, topk, 1.)
             z_sparse = z * mask
@@ -147,22 +160,22 @@ for epoch in range(1, args.epochs+1):
         else:
             z_sparse = z
             sparsity = (z.abs() < 5e-3).float().mean().item()
-        loss_l1 = z_sparse.abs().mean()
 
+        # -- Decoder 用 z_sparse -------------------------------------------
+        recon = model.decode(z_sparse)          # **只傳遮罩後的向量**
+        loss_mse = F.mse_loss(recon, imgs64)
+        loss_l1  = z_sparse.abs().mean()
         lam = args.lambda_l1 * min(1.0, epoch / warm_epochs)
         loss = loss_mse + lam * loss_l1
 
         opt.zero_grad(); loss.backward(); opt.step()
 
         sigma = torch.std(z_sparse.abs(), dim=1).mean().item()
-        running['mse']      += loss_mse.item()
-        running['l1']       += loss_l1.item()
-        running['sparsity'] += sparsity
-        running['sigma']    += sigma
+        agg['mse']+=loss_mse.item(); agg['l1']+=loss_l1.item()
+        agg['sp'] +=sparsity;        agg['sigma']+=sigma
 
-    n = len(dloader)
-    print(f"L={running['mse']/n:.4f}  sparsity={running['sparsity']/n:.3f}  "
-          f"σ̄={running['sigma']/n:.3f}")
+    n=len(dloader)
+    print(f"L={agg['mse']/n:.4f}  sparsity={agg['sp']/n:.3f}  σ̄={agg['sigma']/n:.3f}")
 
 # ───────────────────────── save ─────────────────────────────
 os.makedirs(os.path.dirname(args.save), exist_ok=True)

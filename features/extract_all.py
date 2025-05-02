@@ -17,8 +17,17 @@ from tqdm import tqdm
 # ---------- import 子模組 ----------
 from features.sae.model    import SAE
 from features.palette_emd  import palette_emd
-from features.edge_entropy import edge_entropy
+# from features.edge_entropy import edge_entropy  # H
+from features.sobel_energy import sobel_energy   # H′
 from features.expression   import extract_au as extract_expr
+from features.landmark_pca import extract_pca2, pca_model   # 預先載入 PCA
+# ---- Landmark PCA (可選) ---------------------------------------------
+try:
+    from features.landmark_pca import extract_pca2, pca_model
+    USE_PCA = True
+except Exception as e:
+    print("[Warn] Landmark PCA 模型未載入，Pose 2D 以 0 代替 :", e)
+    USE_PCA = False
 
 # ---------- util ----------
 def load_img(path):
@@ -44,9 +53,9 @@ def main(args):
     # 預先開批量容器（僅在 batch 模式）
     if not args.per_image:
         S = np.zeros((N, args.bottleneck), dtype=np.float32)
-        C = np.zeros((N, 12),             dtype=np.float32)
-        E = np.zeros((N, 30),             dtype=np.float32)
-        H = np.zeros((N, 1),              dtype=np.float32)
+        C = np.zeros((N, 12), dtype=np.float32)
+        E = np.zeros((N, 7), dtype=np.float32)
+        H = np.zeros((N, 1), dtype=np.float32)
 
     os.makedirs(args.out_root, exist_ok=True)
 
@@ -56,9 +65,14 @@ def main(args):
 
         with torch.no_grad():
             z = sae(to_tensor(img).to(dev))[1].squeeze().cpu().numpy()
-        c = palette_emd(img)
-        e = extract_expr(img)
-        h = np.array([edge_entropy(img)], dtype=np.float32)
+
+        # ---- E 通道 6→7 維，保留 yaw 符號 ----
+        au = extract_expr(img)            # AU1–4 (左右對稱) ~4
+        pca2 = extract_pca2(img, pca_model) if USE_PCA else np.zeros(2)
+        yaw  = pca2[0]                    # 取第一主成分近似 yaw，帶正負
+        e    = np.concatenate([au[:4], pca2, [yaw]])   # 7D
+        c    = palette_emd(img)
+        h    = np.array([sobel_energy(img)], dtype=np.float32)
 
         if args.per_image:
             np.save(f"{args.out_root}/{base}_S.npy", z)

@@ -1,43 +1,63 @@
-"""線上輸入內容圖，計算 SRM，回傳 Top‑k 風格圖 ID 與權重。"""
-import argparse, faiss, numpy as np, json
+#!/usr/bin/env python3
+"""線上 SRM 配對：
+   ① 先用 Faiss(S) 找 TOP_T 粗匹配
+   ② 再用新版 SRM αβγδ 重新評分
+"""
+import argparse, faiss, numpy as np
 from pathlib import Path
+from features.srm_utils import srm_score
 
-INDEX_PATH = Path('srm') / 'srm.index'
-FEAT_DIR   = Path('data/features')
-STYLE_META = Path('data/style/style_meta.json')  # 存風格圖檔名順序
+def strip_suffix(name: str):
+    """把檔名最後的 '_S' 去掉；若末兩字不是 '_S' 則原封不動"""
+    return name[:-2] if name.endswith('_S') else name
 
-ALPHA, BETA, GAMMA = 0.5, 0.3, 0.2
+# ── 路徑 ─────────────────────────────────────────
+STYLE_DIR   = Path('features/srm/style_feats_v2')
+CONTENT_DIR = Path('features/srm/content_feats_v2')
+INDEX_PATH  = Path('srm/srm_S.index')
+TOP_T = 10      # 先抓 10 名，再重排
 
+# 直接列舉風格圖檔名，確保與 build_index.py 用同一種排序
+STYLE_NPY  = sorted(STYLE_DIR.glob('*_S.npy'))         # Path 物件列表
+STYLE_BASE = [strip_suffix(p.with_suffix('').stem) for p in STYLE_NPY]   # ← 去掉最後 2 字元 "_S"
 
-def load_vec(file):
-    return np.load(FEAT_DIR / file).astype('float32')
+# ── 工具函式 ─────────────────────────────────────
+def load_feat(root, base):
+    return {
+        'S': np.load(root/f'{base}_S.npy'),
+        'C': np.load(root/f'{base}_C.npy'),
+        'E': np.load(root/f'{base}_E.npy'),      # 7 維
+        'H': float(np.load(root/f'{base}_H.npy'))
+    }
 
 def srm_query(idx_content: int, topk: int = 3):
-    """idx_content 為內容圖在 features 中的序號"""
-    # 讀取向量
-    S_c = load_vec('S_content.npy')[idx_content]
-    C_c = load_vec('C_content.npy')[idx_content]
-    E_c = load_vec('E_content.npy')[idx_content]
-    vec_c = np.concatenate([S_c, C_c, E_c]).reshape(1, -1)
-    faiss.normalize_L2(vec_c)
+    # 讀取 content 特徵
+    cont_files = sorted(CONTENT_DIR.glob('*_S.npy'))
+    c_base = cont_files[idx_content].stem[:-2]        # 去掉 _S
+    feat_c = load_feat(CONTENT_DIR, c_base)
+    q = feat_c['S'].copy()
+    faiss.normalize_L2(q.reshape(1,-1))
 
-    # 載入索引並查詢
+    # Faiss 預選
     index = faiss.read_index(str(INDEX_PATH))
-    D, I = index.search(vec_c, topk)  # 內積越大越相似
+    _, I = index.search(q.reshape(1,-1), TOP_T)
 
-    # 讀取 style 檔名
-    meta = json.load(open(STYLE_META))
-    hits = []
-    for score, idx in zip(D[0], I[0]):
-        hits.append({'style_id': int(idx), 'filename': meta[idx], 'srm': float(score)})
-    return hits
+    # SRM 打分
+    cand = []
+    for idx in I[0]:
+        s_base = STYLE_BASE[idx]                      # 與 Faiss 序號對應
+        feat_s = load_feat(STYLE_DIR, s_base)
+        score  = srm_score(feat_c, feat_s)
+        cand.append((score, s_base))
+    cand.sort(reverse=True)
+    return cand[:topk]
 
+# ── CLI ─────────────────────────────────────────
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--idx', type=int, required=True, help='index of content vector')
-    parser.add_argument('-k', '--topk', type=int, default=3)
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--idx', type=int, required=True, help='content idx (0-based)')
+    ap.add_argument('-k','--topk', type=int, default=3)
+    args = ap.parse_args()
 
-    results = srm_query(args.idx, args.topk)
-    for h in results:
-        print(h)
+    for score, sid in srm_query(args.idx, args.topk):
+        print(f"{sid}  | SRM = {score:.4f}")
