@@ -1,59 +1,70 @@
 #!/usr/bin/env python3
 """
-給 content idx，輸出橫幅 PNG：
-內容 | Top1 | Top2 | Top3   （底下顯示 SRM 分數）
+vis_srm_match.py  ——  把 content idx = --idx
+與其 SRM Top-k 風格圖排成一行 4 圖  (內容 + Top-3)
 """
-import cv2, numpy as np, argparse
+import argparse, faiss, numpy as np, cv2, torch
 from pathlib import Path
-from srm.match import srm_query     # 使用上面新 match.py
+from features.sae.model import SAE            # ★
+from features.extract_all import load_img, to_tensor  # util
 
-def strip_suffix(name: str):
-    """把檔名最後的 '_S' 去掉；若末兩字不是 '_S' 則原封不動"""
-    return name[:-2] if name.endswith('_S') else name
+ap = argparse.ArgumentParser()
+ap.add_argument('--idx', type=int, default=0)
+ap.add_argument('--s_index', required=True)
+ap.add_argument('--style_feat_root', required=True)
+ap.add_argument('--sae_weight', required=True)          # ★ 新增
+ap.add_argument('--ksparse', type=float, default=0.05)  # 與訓練一致
+ap.add_argument('--topk', type=int, default=3)
+args = ap.parse_args()
 
-CONTENT_DIR    = Path('features/srm/content_feats_v2')
-STYLE_IMG_DIR  = Path('data/processed/style')
-CONTENT_IMG_DIR= Path('data/sae_data')
+# ----------- 讀取 style S 庫 & 索引 -------------
+STYLE_DIR  = Path(args.style_feat_root)
+vec_paths  = sorted(STYLE_DIR.glob('*_S.npy'))
+STYLE_BASE = [p.stem[:-2] for p in vec_paths]
+S_mat      = np.stack([np.load(p).astype('float32') for p in vec_paths])
+faiss.normalize_L2(S_mat)
+index      = faiss.read_index(args.s_index)
 
-# 與 match.py 用同一排序基準
-STYLE_PNG_LIST = sorted(STYLE_IMG_DIR.glob('*.png'))
-STYLE_BASE = [strip_suffix(p.stem) for p in STYLE_PNG_LIST]    # .png → stem，再砍 "_S"
+# ----------- 建立 SAE（只做一次） ---------------
+dev = 'cuda' if torch.cuda.is_available() else 'cpu'
+sae = SAE(bottleneck=2048).to(dev).eval()
+sae.load_state_dict(torch.load(args.sae_weight, map_location=dev), strict=False)
 
-def load_img(path, H=256):
-    img = cv2.imread(str(path))[:,:,::-1]
-    h,w,_ = img.shape
-    return cv2.resize(img, (int(w*H/h), H))
+def encode_s(img):
+    with torch.no_grad():
+        z_full = sae(to_tensor(img).to(dev))[1].squeeze().cpu().numpy()
+    if args.ksparse>0:
+        k = int(2048*args.ksparse)
+        topk = np.argpartition(np.abs(z_full), -k)[-k:]
+        mask = np.zeros_like(z_full); mask[topk] = 1
+        z = z_full*mask
+    else:
+        z = z_full
+    return z.astype('float32')
 
-def main(idx, out):
-    # Top-3 風格
-    matches = srm_query(idx, 3)       # [(score, base), ...]
-    # 內容圖
-    cont_base = sorted(CONTENT_DIR.glob('*_S.npy'))[idx].stem[:-2]
-    cont_img  = load_img(CONTENT_IMG_DIR/f'{cont_base}.png')
+# ----------- 取內容圖 → S_vec -------------------
+CONTENT_DIR = Path('data/sae_data')
+content_paths = sorted(CONTENT_DIR.glob('*'))
+c_img = load_img(str(content_paths[args.idx]))
+c_S   = encode_s(c_img)
+faiss.normalize_L2(c_S.reshape(1,-1))
 
-    tiles=[cont_img]; captions=['內容']
-    for score, sid in matches:
-        style_img = load_img(STYLE_IMG_DIR/f'{sid}.png')
-        tiles.append(style_img)
-        captions.append(f'SRM={score:.2f}')
+# ----------- 查詢 Top-k -------------------------
+D,I = index.search(c_S.reshape(1,-1), args.topk+1)
+ids, sims = [], []
+for sid,sim in zip(I[0], D[0]):        # 排除「跟自己 cos=1」那筆
+    if sim < 0.999: ids.append(sid); sims.append(sim)
+    if len(ids)==args.topk: break
 
-    # 拼成一行
-    gap, H = 10, tiles[0].shape[0]
-    widths = [im.shape[1] for im in tiles]
-    canvas = np.ones((H+40, sum(widths)+gap*len(tiles), 3), dtype=np.uint8)*255
-    x=0
-    for i,im in enumerate(tiles):
-        canvas[0:H, x:x+im.shape[1]] = im
-        cv2.putText(canvas, captions[i], (x+5, H+25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2, cv2.LINE_AA)
-        x += im.shape[1]+gap
+# ----------- 拼圖 -------------------------------
+canvas = cv2.resize(c_img,(256,256))
+for rank,(sid,sim) in enumerate(zip(ids,sims),1):
+    sty_img = cv2.imread(f'data/processed/style/{STYLE_BASE[sid]}.png')[:,:,::-1]
+    block = cv2.putText(cv2.resize(sty_img,(256,256)).copy(),
+                        f'{rank}:{sim:.2f}', (5,24),
+                        cv2.FONT_HERSHEY_SIMPLEX,.7,(255,0,0),2)
+    canvas = np.hstack([canvas, block])
 
-    cv2.imwrite(out, canvas[:,:,::-1])
-    print('✓ saved', out)
-
-if __name__ == '__main__':
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--idx', type=int, required=True, help='content idx (0-based)')
-    ap.add_argument('--out', default='srm_panel.png')
-    args = ap.parse_args()
-    main(args.idx, args.out)
+out = Path(f'srm_vis_idx{args.idx}.png')
+cv2.imwrite(str(out), canvas[:,:,::-1])
+print('✓ saved →', out)

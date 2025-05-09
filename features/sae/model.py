@@ -31,3 +31,11 @@ class SAE(nn.Module):
         z = self.encode(x)
         y = self.fc_dec(z).view(-1,512,4,4)
         return self.dec(y), z
+        # ───────── 新增：讓外部 script 可直接呼叫 model.decode(z) ─────────
+    def decode(self, z):
+        """
+        只負責『把 latent z 還原成 64×64 圖』，**不**做 sparsity 遮罩內部判斷
+        """
+        h = self.dec[0].in_channels         # = 512，避免寫死 magic number
+        y = self.fc_dec(z).view(-1, h, 4, 4)
+        return self.dec(y)

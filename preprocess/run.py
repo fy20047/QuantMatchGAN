@@ -4,8 +4,8 @@ Usage:
     python preprocess/run.py \
       --style_dir data/style/picasso \
       --content_dir data/content \
-      --align on \
-      --wb on \
+      --align off \
+      --wb off \
       --out_dir data/processed
 """
 import argparse, shutil, os
