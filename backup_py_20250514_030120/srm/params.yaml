@@ -1,0 +1,6 @@
+alpha: 0.5        # SRM 結構權重
+beta: 0.3         # SRM 色彩權重
+gamma: 0.2        # SRM 表情權重
+k: 3              # 取 Top‑k 風格圖平均
+index_type: flat  # flat | ivfpq | hnsw
+threshold: 0.55   # SRM 最低分；低於則降低 color‑weight
