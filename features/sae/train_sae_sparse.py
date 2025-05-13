@@ -94,9 +94,12 @@ ap.add_argument('--bottleneck', type=int, default=2048)
 ap.add_argument('--epochs',     type=int, default=10)
 ap.add_argument('--batch',      type=int, default=16)
 ap.add_argument('--lr',         type=float, default=3e-5)
-ap.add_argument('--lambda_l1',  type=float, default=0.03)
 ap.add_argument('--lambda_warm',type=int, default=2)
-ap.add_argument('--ksparse',    type=float, default=0.10)
+
+ap.add_argument('--ksparse',    type=float, default=0.20)   # ↑ 0.10 → 0.20
+ap.add_argument('--lambda_l1',  type=float, default=0.05)   # ↑ 0.03 → 0.05
+ap.add_argument('--lambda_dc',  type=float, default=0.10)   # ← 新增 decorrelation 權重
+
 ap.add_argument('--save',       default='features/sae/sae_sparse2048.pth')
 args = ap.parse_args()
 
@@ -123,7 +126,7 @@ warm_epochs = max(1, args.lambda_warm)
 # 訓練
 for epoch in range(1, args.epochs+1):
     pbar = tqdm(dloader, desc=f"[E{epoch}/{args.epochs}]")
-    agg = {'mse':0,'l1':0,'sp':0,'sigma':0,'true_sp':0,'nz':0}
+    agg = {'mse':0,'l1':0,'dc':0,'sp':0,'sigma':0,'true_sp':0,'nz':0}
     for imgs in pbar:
         imgs = imgs.cuda()
         imgs64 = F.interpolate(imgs, 64, mode='bilinear', align_corners=False)
@@ -135,12 +138,15 @@ for epoch in range(1, args.epochs+1):
         if k_percent:
             k = int(z.shape[1]*k_percent)
             # --- 隨機循環位移，讓每 batch 挑到不同維度 -------------
-            shift = torch.randint(0, z.shape[1], (1,)).item()
-            z_roll= torch.roll(z, shifts=shift, dims=1)
-            topk  = torch.topk(z_roll, k, dim=1).indices
-            mask  = torch.zeros_like(z_roll).scatter_(1, topk, 1.)
-            mask  = torch.roll(mask, shifts=-shift, dims=1)     # 轉回原位
-            z_sparse = z * mask
+            # 每張圖各自隨機 shift，避免 batch 同步 
+            shifts = torch.randint(0, z.size(1), (z.size(0),1), 
+                                   device=z.device)              # B×1 
+            idx = (torch.arange(z.size(1), device=z.device)[None] + shifts) % z.size(1) 
+            z_roll = torch.gather(z, 1, idx)                     # 已 roll 
+ 
+            topk  = z_roll.topk(k, dim=1).indices 
+            mask  = torch.zeros_like(z_roll).scatter_(1, topk, 1.) 
+            z_sparse = z_roll * mask                             # ★ 再也不 roll-back
         else:
             z_sparse = z
 
@@ -149,7 +155,11 @@ for epoch in range(1, args.epochs+1):
         loss_mse = F.mse_loss(recon, imgs64)
         loss_l1  = z_sparse.abs().mean()
         lam = args.lambda_l1 * min(1.0, epoch / warm_epochs)
-        loss = loss_mse + lam * loss_l1
+        # ---------- decorrelation loss ----------
+        z_norm  = F.normalize(z_sparse, dim=1)
+        corr    = torch.matmul(z_norm, z_norm.T)
+        loss_dc = torch.triu(corr, diagonal=1).pow(2).mean()
+        loss = loss_mse + lam * loss_l1 + args.lambda_dc * loss_dc
 
         opt.zero_grad(); loss.backward(); opt.step()
 
@@ -161,13 +171,14 @@ for epoch in range(1, args.epochs+1):
         agg['mse']+=loss_mse.item()
         agg['l1'] +=loss_l1.item()
         # agg['sp'] +=sparsity
+        agg['dc'] += loss_dc.item()
         agg['sigma']+=sigma
         agg['true_sp']+=true_sp
         agg['nz']+=nonzero.mean().item()
 
     n=len(dloader)
-    print(f"L={agg['mse']/n:.4f}  k={k_percent:.2f}  true_sp={agg['true_sp']/n:.3f}  ",
-          f"nz={agg['nz']/n:.1f}  σ̄={agg['sigma']/n:.3f}")
+    print(f"L={agg['mse']/n:.4f}  k={args.ksparse:.2f}  true_sp={agg['true_sp']/n:.3f}  "
+          f"nz={agg['nz']/n:.1f}  σ̄={agg['sigma']/n:.3f}  dc={agg['dc']/n:.4f}")
 
 # 儲存模型
 save_dir = os.path.dirname(args.save) or '.'

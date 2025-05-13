@@ -7,10 +7,10 @@ import numpy as np
 from numpy.linalg import norm
 
 # ---- 超參數 -----------------------------------------------------------
-ALPHA  = 0.50      # S (geometry)
-BETA   = 0.30      # C (palette-EMD)
-GAMMA  = 0.15      # E (AU+Pose PCA)
-DELTA  = 0.05      # H' (Sobel energy)
+ALPHA  = 0.70      # S (geometry)
+BETA   = 0.23    # C (palette-EMD)
+GAMMA  = 0.0      # E (AU+Pose PCA)
+DELTA  = 0.02     # H' (Sobel energy)
 H_MAX  = 600.0     # 依資料集最大值設定，可動態計算
 
 # ---- 基本相似度 -------------------------------------------------------

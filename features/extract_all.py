@@ -75,11 +75,10 @@ def main(args):
         if args.ksparse>0:
             k = int(args.bottleneck*args.ksparse)
             shift = np.random.randint(0, args.bottleneck)
-            z_roll = np.roll(z_full, shift)
+            z_roll = np.roll(z_full, shift)       # 與訓練一致：只 roll，不回捲
             topk = np.argpartition(z_roll, -k)[-k:]
             mask = np.zeros_like(z_roll); mask[topk]=1
-            mask = np.roll(mask, -shift)
-            z = z_full*mask
+            z = z_roll*mask                       # 直接遮罩 roll 後向量
         else:
             z = z_full
 
@@ -88,10 +87,15 @@ def main(args):
         c = palette_emd(img)
 
         # ----- 表情 + 視角 E  (7D) --------------------------------------
-        au4 = extract_au(img)[:4]          # AU1-4 左右對稱
-        pca2 = extract_pca2(img, pca_model) if USE_PCA else np.zeros(2)
-        yaw  = pca2[0]                     # yaw 保留正負號
-        e = np.concatenate([au4, pca2, [yaw]])   # (7,)
+        # au4 = extract_au(img)[:4]          # AU1-4 左右對稱
+        # pca2 = extract_pca2(img, pca_model) if USE_PCA else np.zeros(2)
+        # yaw  = pca2[0]                     # yaw 保留正負號
+        # e = np.concatenate([au4, pca2, [yaw]])   # (7,)
+
+        # ----- 姿態 E  (3D: roll/pitch + yaw) ---------------------------
+        pca2 = extract_pca2(img, pca_model) if USE_PCA else np.zeros(2, dtype=np.float32)
+        yaw  = pca2[0] if USE_PCA else 0.0
+        e = np.concatenate([pca2, [yaw]]).astype('float32')   # (3,)
 
         # ----- 邊緣能量 H′ (1D) -----------------------------------------
         h = np.array([sobel_energy(img)], dtype=np.float32)
